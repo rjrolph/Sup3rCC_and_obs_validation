@@ -17,7 +17,7 @@ obs_df = pd.read_csv(obs_datapath + 'GHCNd_met_station_orlando_intl.csv')
 
 
 
-### Met station data
+### Met station data (from https://www.ncei.noaa.gov/cdo-web/search) 
 # AWND - Average daily wind speed (mph)
 # PGTM - Peak gust time (HHMM)
 # TAVG - Average daily temperature (C)
@@ -42,8 +42,10 @@ obs_df = pd.read_csv(obs_datapath + 'GHCNd_met_station_orlando_intl.csv')
 # relativehumidity_2m
 # temperature_2m
 
+
+
 ## To open multiple files
-## Note: can change this later to go from 2020 - 2059!!! 
+# Open files (2015 through 2059 available)
 files_super = os.path.join(supercc_datapath, 'sup3rcc_conus_ecearth3cc_ssp245_r1i1p1f1_trh_20*.h5')
 ds_super_all = xr.open_mfdataset(files_super, engine='rex', compat='override', coords='minimal')
 
@@ -66,9 +68,40 @@ df = ts[['relativehumidity_2m', 'temperature_2m']].to_dataframe()
 
 
 
-## Calculate max daily temp of all years from files_super
-temp_daily_max = ts['temperature_2m'].resample(time='1D').max()
-temp_daily_max = temp_daily_max.compute()
+### Calculate the max daily temp for the model data and save to NetCDF (if not already saved) 
+if not os.path.exists("Data/temp_daily_max.nc"):
+    ## Calculate max daily temp of all years from files_super
+    temp_daily_max = ts['temperature_2m'].resample(time='1D').max()
+    temp_daily_max_float = temp_daily_max.compute().astype("float32") # Cannot save dtype int16 to netcdf
+
+    ## Save to NetCDF
+    ds = xr.Dataset({"temperature_2m": temp_daily_max_float})
+    os.makedirs("Data", exist_ok=True)
+    # Prepare data
+    data = temp_daily_max.values.astype("float32")
+    time = temp_daily_max["time"].values
+    # Handle scalar coordinates robustly
+    attrs = {}
+    for k in temp_daily_max.coords:
+        coord = temp_daily_max.coords[k]
+        if coord.shape == ():  # scalar
+            val = coord.values
+            # Decode bytes if needed
+            if isinstance(val, bytes):
+                val = val.decode("utf-8")
+            attrs[k] = val
+    # Create clean Dataset
+    ds_clean = xr.Dataset(
+        {"temperature_2m": ("time", data)},
+        coords={"time": time},
+        attrs=attrs
+    )
+    # Save to NetCDF
+    ds_clean.to_netcdf("Data/temp_daily_max.nc", engine="netcdf4", format="NETCDF4")
+else:
+    # Read from file 
+    ds = xr.open_dataset('Data/temp_daily_max.nc')
+    temp_daily_max = ds['temperature_2m']
 
 
 """ handler_2020 = MultiFileResourceX(os.path.join(supercc_datapath, fn_2020))
@@ -81,7 +114,8 @@ ti_2020 = handler_2020.time_index
 data_2020 = pd.DataFrame({}) """
 
 
-### Plot a year of max temp data and label how many days exceed threshold in each obs and model data
+
+### Plot one year of max temp data and label how many days exceed threshold in each obs and model data
 def plot_daily_max_year_with_threshold(temp_daily_max, obs_df, year, threshold=30):
     # --- Observations ---
     obs_df = obs_df.copy()
@@ -154,7 +188,7 @@ def plot_daily_max_year_with_threshold(temp_daily_max, obs_df, year, threshold=3
     plt.show()
 
 
-
+### Plot bar chart of number of days obs and model are above temp threshold for a span of years
 def plot_obs_minus_model_days_complete_years_bar_colored_legend(temp_daily_max, obs_df, threshold=30):
     # Ensure DATE is datetime
     obs_df = obs_df.copy()
@@ -229,7 +263,7 @@ def plot_obs_minus_model_days_complete_years_bar_colored_legend(temp_daily_max, 
     return df_diff
 
 
-
+### Plot the number of days the model is above the temp threshold for each year of model data
 def plot_model_days_above_threshold(temp_daily_max, threshold=30):
     # Extract all years from the model data
     years = np.unique(temp_daily_max['time.year'].values)
@@ -270,12 +304,87 @@ def plot_model_days_above_threshold(temp_daily_max, threshold=30):
     return df_model
 
 
+def plot_multiyear_window_max_climatology(temp_daily_max, obs_df, 
+                                          start_year=2019, end_year=2024,
+                                          threshold=30):
+    """
+    For each day-of-year (1..365), compute the maximum temperature across all
+    years in the window for both observations and model. Produce a 365-day plot,
+    shade days above threshold, and display the difference in number of threshold exceedances.
+    """
 
-##% Procedure
-year = 2020
-# Plot daily temp max for a single year with threshold
-plot_daily_max_year_with_threshold(temp_daily_max, obs_df, year, threshold=30)
-# Plot for all complete years difference in days above threshold
-df_diff_complete = plot_obs_minus_model_days_complete_years_bar_colored_legend(temp_daily_max, obs_df, threshold=30)
-# Plot model days above threshold for all complete years
-df_model_days = plot_model_days_above_threshold(temp_daily_max, threshold=30)
+    # -------------------------
+    # OBSERVATIONS
+    # -------------------------
+    obs_df = obs_df.copy()
+    obs_df["DATE"] = pd.to_datetime(obs_df["DATE"])
+    mask = (obs_df["DATE"].dt.year >= start_year) & (obs_df["DATE"].dt.year <= end_year)
+    obs_win = obs_df[mask].set_index("DATE")
+    obs_tmax_c = (obs_win["TMAX"] - 32) * 5/9
+    obs_by_doy = obs_tmax_c.groupby(obs_tmax_c.index.dayofyear).max()
+    obs_curve = obs_by_doy.reindex(range(1, 366))
+
+    # -------------------------
+    # MODEL
+    # -------------------------
+    model_win = temp_daily_max.sel(time=slice(str(start_year), str(end_year)))
+    model_series = model_win.to_pandas().squeeze()
+    model_by_doy = model_series.groupby(model_series.index.dayofyear).max()
+    model_curve = model_by_doy.reindex(range(1, 366))
+
+    # -------------------------
+    # PLOTTING
+    # -------------------------
+    fig, ax = plt.subplots(figsize=(12,5))
+    ax.plot(obs_curve.index, obs_curve.values, label="Observed Max Across Window", color="blue")
+    ax.plot(model_curve.index, model_curve.values, label="Model Max Across Window", color="red")
+    
+    # Threshold line
+    ax.axhline(threshold, linestyle="--", color="k", linewidth=1)
+
+    # Shade days above threshold
+    obs_above = obs_curve > threshold
+    model_above = model_curve > threshold
+    ax.fill_between(obs_curve.index, threshold, obs_curve.values,
+                    where=obs_above, color="blue", alpha=0.2, label="Obs > Threshold")
+    ax.fill_between(model_curve.index, threshold, model_curve.values,
+                    where=model_above, color="red", alpha=0.2, label="Model > Threshold")
+
+    # Month ticks
+    months = pd.date_range("2001-01-01", "2001-12-31", freq="MS")  # dummy non-leap year
+    month_ticks = months.dayofyear
+    month_labels = months.month
+    ax.set_xticks(month_ticks)
+    ax.set_xticklabels(month_labels)
+
+    ax.set_xlabel("Month")
+    ax.set_ylabel("Max Temperature Across Window (°C)")
+    ax.set_title(f"Multi-Year Maximum Daily Temperature Climatology ({start_year}–{end_year})")
+    ax.grid(True)
+    ax.legend()
+
+    # -------------------------
+    # DAYS ABOVE THRESHOLD
+    # -------------------------
+    obs_days = obs_above.sum()
+    model_days = model_above.sum()
+    diff_days = obs_days - model_days  # obs minus model
+
+    # Add difference to upper left corner
+    ax.text(0.02, 0.95, f"Obs - Model days above {threshold}°C: {diff_days}",
+            transform=ax.transAxes, fontsize=12, verticalalignment='top',
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.5))
+
+    plt.tight_layout()
+    plt.savefig(f'Figures/multiyear_window_max_climatology_{start_year}_{end_year}.png')
+    #plt.show()
+
+    return obs_curve, model_curve, obs_days, model_days, diff_days
+
+
+
+###% Procedure
+plot_multiyear_window_max_climatology(temp_daily_max, obs_df,
+                                          start_year=2019, end_year=2024,
+                                          threshold=30)
+
