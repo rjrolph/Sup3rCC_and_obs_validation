@@ -385,6 +385,6 @@ def plot_multiyear_window_max_climatology(temp_daily_max, obs_df,
 
 ###% Procedure
 plot_multiyear_window_max_climatology(temp_daily_max, obs_df,
-                                          start_year=2019, end_year=2024,
+                                          start_year=2015, end_year=2024,
                                           threshold=30)
 
